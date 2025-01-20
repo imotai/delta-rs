@@ -1,36 +1,84 @@
-use std::collections::HashMap;
-use std::sync::Arc;
-
-use crate::utils::{delete_dir, rt, walk_tree};
-use crate::PyDeltaTableError;
-
-use deltalake::storage::{DynObjectStore, ListResult, MultipartId, ObjectStoreError, Path};
+use crate::error::PythonError;
+use crate::utils::{delete_dir, rt, walk_tree, warn};
+use crate::RawDeltaTable;
+use deltalake::storage::object_store::{MultipartUpload, PutPayloadMut};
+use deltalake::storage::{DynObjectStore, ListResult, ObjectStoreError, Path};
 use deltalake::DeltaTableBuilder;
 use pyo3::exceptions::{PyIOError, PyNotImplementedError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{IntoPyDict, PyBytes};
-use tokio::io::{AsyncWrite, AsyncWriteExt};
-use tokio::runtime::Runtime;
+use pyo3::types::{IntoPyDict, PyBytes, PyType};
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::sync::Arc;
 
-#[pyclass(subclass)]
+const DEFAULT_MAX_BUFFER_SIZE: usize = 5 * 1024 * 1024;
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub(crate) struct FsConfig {
+    pub(crate) root_url: String,
+    pub(crate) options: HashMap<String, String>,
+}
+
+#[pyclass(subclass, module = "deltalake._internal")]
 #[derive(Debug, Clone)]
 pub struct DeltaFileSystemHandler {
     pub(crate) inner: Arc<DynObjectStore>,
-    pub(crate) rt: Arc<Runtime>,
+    pub(crate) config: FsConfig,
+    pub(crate) known_sizes: Option<HashMap<String, i64>>,
+}
+
+impl DeltaFileSystemHandler {
+    fn parse_path(path: &str) -> Path {
+        // Path::from will percent-encode the input, while Path::parse won't. So
+        // we should prefer Path::parse.
+        match Path::parse(path) {
+            Ok(path) => path,
+            Err(_) => Path::from(path),
+        }
+    }
 }
 
 #[pymethods]
 impl DeltaFileSystemHandler {
     #[new]
-    #[args(options = "None")]
-    fn new(table_uri: &str, options: Option<HashMap<String, String>>) -> PyResult<Self> {
-        let storage = DeltaTableBuilder::from_uri(table_uri)
-            .with_storage_options(options.unwrap_or_default())
+    #[pyo3(signature = (table_uri, options = None, known_sizes = None))]
+    fn new(
+        table_uri: String,
+        options: Option<HashMap<String, String>>,
+        known_sizes: Option<HashMap<String, i64>>,
+    ) -> PyResult<Self> {
+        let storage = DeltaTableBuilder::from_uri(&table_uri)
+            .with_storage_options(options.clone().unwrap_or_default())
             .build_storage()
-            .map_err(PyDeltaTableError::from_raw)?;
+            .map_err(PythonError::from)?
+            .object_store(None);
+
         Ok(Self {
             inner: storage,
-            rt: Arc::new(rt()?),
+            config: FsConfig {
+                root_url: table_uri,
+                options: options.unwrap_or_default(),
+            },
+            known_sizes,
+        })
+    }
+
+    #[classmethod]
+    #[pyo3(signature = (table, options = None, known_sizes = None))]
+    fn from_table(
+        _cls: &Bound<'_, PyType>,
+        table: &RawDeltaTable,
+        options: Option<HashMap<String, String>>,
+        known_sizes: Option<HashMap<String, i64>>,
+    ) -> PyResult<Self> {
+        let storage = table.object_store()?;
+        Ok(Self {
+            inner: storage,
+            config: FsConfig {
+                root_url: table.with_table(|t| Ok(t.table_uri()))?,
+                options: options.unwrap_or_default(),
+            },
+            known_sizes,
         })
     }
 
@@ -41,15 +89,14 @@ impl DeltaFileSystemHandler {
     fn normalize_path(&self, path: String) -> PyResult<String> {
         let suffix = if path.ends_with('/') { "/" } else { "" };
         let path = Path::parse(path).unwrap();
-        Ok(format!("{}{}", path, suffix))
+        Ok(format!("{path}{suffix}"))
     }
 
     fn copy_file(&self, src: String, dest: String) -> PyResult<()> {
-        let from_path = Path::from(src);
-        let to_path = Path::from(dest);
-        self.rt
-            .block_on(self.inner.copy(&from_path, &to_path))
-            .map_err(PyDeltaTableError::from_object_store)?;
+        let from_path = Self::parse_path(&src);
+        let to_path = Self::parse_path(&dest);
+        rt().block_on(self.inner.copy(&from_path, &to_path))
+            .map_err(PythonError::from)?;
         Ok(())
     }
 
@@ -59,72 +106,83 @@ impl DeltaFileSystemHandler {
     }
 
     fn delete_dir(&self, path: String) -> PyResult<()> {
-        let path = Path::from(path);
-        self.rt
-            .block_on(delete_dir(self.inner.as_ref(), &path))
-            .map_err(PyDeltaTableError::from_object_store)?;
+        let path = Self::parse_path(&path);
+        rt().block_on(delete_dir(self.inner.as_ref(), &path))
+            .map_err(PythonError::from)?;
         Ok(())
     }
 
     fn delete_file(&self, path: String) -> PyResult<()> {
-        let path = Path::from(path);
-        self.rt
-            .block_on(self.inner.delete(&path))
-            .map_err(PyDeltaTableError::from_object_store)?;
+        let path = Self::parse_path(&path);
+        rt().block_on(self.inner.delete(&path))
+            .map_err(PythonError::from)?;
         Ok(())
     }
 
     fn equals(&self, other: &DeltaFileSystemHandler) -> PyResult<bool> {
-        Ok(format!("{:?}", self) == format!("{:?}", other))
+        Ok(format!("{self:?}") == format!("{other:?}"))
     }
 
-    fn get_file_info<'py>(&self, paths: Vec<String>, py: Python<'py>) -> PyResult<Vec<&'py PyAny>> {
-        let fs = PyModule::import(py, "pyarrow.fs")?;
+    fn get_file_info<'py>(
+        &self,
+        paths: Vec<String>,
+        py: Python<'py>,
+    ) -> PyResult<Vec<Bound<'py, PyAny>>> {
+        let fs = PyModule::import_bound(py, "pyarrow.fs")?;
         let file_types = fs.getattr("FileType")?;
 
-        let to_file_info = |loc: String, type_: &PyAny, kwargs: HashMap<&str, i64>| {
-            fs.call_method("FileInfo", (loc, type_), Some(kwargs.into_py_dict(py)))
+        let to_file_info = |loc: &str, type_: &Bound<'py, PyAny>, kwargs: &HashMap<&str, i64>| {
+            fs.call_method(
+                "FileInfo",
+                (loc, type_),
+                Some(&kwargs.into_py_dict_bound(py)),
+            )
         };
 
         let mut infos = Vec::new();
         for file_path in paths {
-            let path = Path::from(file_path);
-            let listed = self
-                .rt
-                .block_on(self.inner.list_with_delimiter(Some(&path)))
-                .map_err(PyDeltaTableError::from_object_store)?;
+            let path = Self::parse_path(&file_path);
+            let listed = py.allow_threads(|| {
+                rt().block_on(self.inner.list_with_delimiter(Some(&path)))
+                    .map_err(PythonError::from)
+            })?;
 
             // TODO is there a better way to figure out if we are in a directory?
             if listed.objects.is_empty() && listed.common_prefixes.is_empty() {
-                let maybe_meta = self.rt.block_on(self.inner.head(&path));
+                let maybe_meta = py.allow_threads(|| rt().block_on(self.inner.head(&path)));
                 match maybe_meta {
                     Ok(meta) => {
                         let kwargs = HashMap::from([
                             ("size", meta.size as i64),
-                            ("mtime_ns", meta.last_modified.timestamp_nanos()),
+                            (
+                                "mtime_ns",
+                                meta.last_modified.timestamp_nanos_opt().ok_or(
+                                    PyValueError::new_err("last modified datetime out of range"),
+                                )?,
+                            ),
                         ]);
                         infos.push(to_file_info(
-                            meta.location.to_string(),
-                            file_types.getattr("File")?,
-                            kwargs,
+                            meta.location.as_ref(),
+                            &file_types.getattr("File")?,
+                            &kwargs,
                         )?);
                     }
                     Err(ObjectStoreError::NotFound { .. }) => {
                         infos.push(to_file_info(
-                            path.to_string(),
-                            file_types.getattr("NotFound")?,
-                            HashMap::new(),
+                            path.as_ref(),
+                            &file_types.getattr("NotFound")?,
+                            &HashMap::new(),
                         )?);
                     }
                     Err(err) => {
-                        return Err(PyDeltaTableError::from_object_store(err));
+                        return Err(PythonError::from(err).into());
                     }
                 }
             } else {
                 infos.push(to_file_info(
-                    path.to_string(),
-                    file_types.getattr("Directory")?,
-                    HashMap::new(),
+                    path.as_ref(),
+                    &file_types.getattr("Directory")?,
+                    &HashMap::new(),
                 )?);
             }
         }
@@ -132,26 +190,27 @@ impl DeltaFileSystemHandler {
         Ok(infos)
     }
 
-    #[args(allow_not_found = "false", recursive = "false")]
+    #[pyo3(signature = (base_dir, allow_not_found = false, recursive = false))]
     fn get_file_info_selector<'py>(
         &self,
         base_dir: String,
         allow_not_found: bool,
         recursive: bool,
         py: Python<'py>,
-    ) -> PyResult<Vec<&'py PyAny>> {
-        let fs = PyModule::import(py, "pyarrow.fs")?;
+    ) -> PyResult<Vec<Bound<'py, PyAny>>> {
+        let fs = PyModule::import_bound(py, "pyarrow.fs")?;
         let file_types = fs.getattr("FileType")?;
 
-        let to_file_info = |loc: String, type_: &PyAny, kwargs: HashMap<&str, i64>| {
-            fs.call_method("FileInfo", (loc, type_), Some(kwargs.into_py_dict(py)))
+        let to_file_info = |loc: String, type_: &Bound<'py, PyAny>, kwargs: HashMap<&str, i64>| {
+            fs.call_method(
+                "FileInfo",
+                (loc, type_),
+                Some(&kwargs.into_py_dict_bound(py)),
+            )
         };
 
-        let path = Path::from(base_dir);
-        let list_result = match self
-            .rt
-            .block_on(walk_tree(self.inner.clone(), &path, recursive))
-        {
+        let path = Self::parse_path(&base_dir);
+        let list_result = match rt().block_on(walk_tree(self.inner.clone(), &path, recursive)) {
             Ok(res) => Ok(res),
             Err(ObjectStoreError::NotFound { path, source }) => {
                 if allow_not_found {
@@ -165,7 +224,7 @@ impl DeltaFileSystemHandler {
             }
             Err(err) => Err(err),
         }
-        .map_err(PyDeltaTableError::from_object_store)?;
+        .map_err(PythonError::from)?;
 
         let mut infos = vec![];
         infos.extend(
@@ -175,7 +234,7 @@ impl DeltaFileSystemHandler {
                 .map(|p| {
                     to_file_info(
                         p.to_string(),
-                        file_types.getattr("Directory")?,
+                        &file_types.getattr("Directory")?,
                         HashMap::new(),
                     )
                 })
@@ -188,11 +247,16 @@ impl DeltaFileSystemHandler {
                 .map(|meta| {
                     let kwargs = HashMap::from([
                         ("size", meta.size as i64),
-                        ("mtime_ns", meta.last_modified.timestamp_nanos()),
+                        (
+                            "mtime_ns",
+                            meta.last_modified.timestamp_nanos_opt().ok_or(
+                                PyValueError::new_err("last modified datetime out of range"),
+                            )?,
+                        ),
                     ]);
                     to_file_info(
                         meta.location.to_string(),
-                        file_types.getattr("File")?,
+                        &file_types.getattr("File")?,
                         kwargs,
                     )
                 })
@@ -203,54 +267,83 @@ impl DeltaFileSystemHandler {
     }
 
     fn move_file(&self, src: String, dest: String) -> PyResult<()> {
-        let from_path = Path::from(src);
-        let to_path = Path::from(dest);
+        let from_path = Self::parse_path(&src);
+        let to_path = Self::parse_path(&dest);
         // TODO check the if not exists semantics
-        self.rt
-            .block_on(self.inner.rename(&from_path, &to_path))
-            .map_err(PyDeltaTableError::from_object_store)?;
+        rt().block_on(self.inner.rename(&from_path, &to_path))
+            .map_err(PythonError::from)?;
         Ok(())
     }
 
     fn open_input_file(&self, path: String) -> PyResult<ObjectInputFile> {
-        let path = Path::from(path);
-        let file = self
-            .rt
+        let size = match &self.known_sizes {
+            Some(sz) => sz.get(&path),
+            None => None,
+        };
+
+        let path = Self::parse_path(&path);
+        let file = rt()
             .block_on(ObjectInputFile::try_new(
-                self.rt.clone(),
                 self.inner.clone(),
                 path,
+                size.copied(),
             ))
-            .map_err(PyDeltaTableError::from_object_store)?;
+            .map_err(PythonError::from)?;
         Ok(file)
     }
 
-    #[args(metadata = "None")]
+    #[pyo3(signature = (path, metadata = None))]
     fn open_output_stream(
         &self,
         path: String,
         #[allow(unused)] metadata: Option<HashMap<String, String>>,
+        py: Python<'_>,
     ) -> PyResult<ObjectOutputStream> {
-        let path = Path::from(path);
-        let file = self
-            .rt
+        let path = Self::parse_path(&path);
+        let max_buffer_size = self
+            .config
+            .options
+            .get("max_buffer_size")
+            .map_or(DEFAULT_MAX_BUFFER_SIZE, |v| {
+                v.parse::<usize>().unwrap_or(DEFAULT_MAX_BUFFER_SIZE)
+            });
+        if max_buffer_size < DEFAULT_MAX_BUFFER_SIZE {
+            warn(
+                py,
+                "UserWarning",
+                format!(
+                    "You specified a `max_buffer_size` of {} bits less than {} bits. Most object 
+                    stores expect greater than that number, you may experience issues",
+                    max_buffer_size, DEFAULT_MAX_BUFFER_SIZE
+                )
+                .as_str(),
+                Some(2),
+            )?;
+        }
+        let file = rt()
             .block_on(ObjectOutputStream::try_new(
-                self.rt.clone(),
                 self.inner.clone(),
                 path,
+                max_buffer_size,
             ))
-            .map_err(PyDeltaTableError::from_object_store)?;
+            .map_err(PythonError::from)?;
         Ok(file)
+    }
+
+    pub fn __getnewargs__(&self) -> PyResult<(String, Option<HashMap<String, String>>)> {
+        Ok((
+            self.config.root_url.clone(),
+            Some(self.config.options.clone()),
+        ))
     }
 }
 
 // TODO the C++ implementation track an internal lock on all random access files, DO we need this here?
 // TODO add buffer to store data ...
-#[pyclass(weakref)]
+#[pyclass(weakref, module = "deltalake._internal")]
 #[derive(Debug, Clone)]
 pub struct ObjectInputFile {
     store: Arc<DynObjectStore>,
-    rt: Arc<Runtime>,
     path: Path,
     content_length: i64,
     #[pyo3(get)]
@@ -262,19 +355,24 @@ pub struct ObjectInputFile {
 
 impl ObjectInputFile {
     pub async fn try_new(
-        rt: Arc<Runtime>,
         store: Arc<DynObjectStore>,
         path: Path,
+        size: Option<i64>,
     ) -> Result<Self, ObjectStoreError> {
-        // Issue a HEAD Object to get the content-length and ensure any
+        // If file size is not given, issue a HEAD Object to get the content-length and ensure any
         // errors (e.g. file not found) don't wait until the first read() call.
-        let meta = store.head(&path).await?;
-        let content_length = meta.size as i64;
+        let content_length = match size {
+            Some(s) => s,
+            None => {
+                let meta = store.head(&path).await?;
+                meta.size as i64
+            }
+        };
+
         // TODO make sure content length is valid
         // https://github.com/apache/arrow/blob/f184255cbb9bf911ea2a04910f711e1a924b12b8/cpp/src/arrow/filesystem/s3fs.cc#L1083
         Ok(Self {
             store,
-            rt,
             path,
             content_length,
             closed: false,
@@ -294,14 +392,12 @@ impl ObjectInputFile {
     fn check_position(&self, position: i64, action: &str) -> PyResult<()> {
         if position < 0 {
             return Err(PyIOError::new_err(format!(
-                "Cannot {} for negative position.",
-                action
+                "Cannot {action} for negative position."
             )));
         }
         if position > self.content_length {
             return Err(PyIOError::new_err(format!(
-                "Cannot {} past end of file.",
-                action
+                "Cannot {action} past end of file."
             )));
         }
         Ok(())
@@ -341,7 +437,7 @@ impl ObjectInputFile {
         Ok(self.content_length)
     }
 
-    #[args(whence = "0")]
+    #[pyo3(signature = (offset, whence = 0))]
     fn seek(&mut self, offset: i64, whence: i64) -> PyResult<i64> {
         self.check_closed()?;
         self.check_position(offset, "seek")?;
@@ -367,8 +463,8 @@ impl ObjectInputFile {
         Ok(self.pos)
     }
 
-    #[args(nbytes = "None")]
-    fn read(&mut self, nbytes: Option<i64>) -> PyResult<Py<PyBytes>> {
+    #[pyo3(signature = (nbytes = None))]
+    fn read<'py>(&mut self, nbytes: Option<i64>, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
         self.check_closed()?;
         let range = match nbytes {
             Some(len) => {
@@ -385,15 +481,18 @@ impl ObjectInputFile {
         };
         let nbytes = (range.end - range.start) as i64;
         self.pos += nbytes;
-        let obj = if nbytes > 0 {
-            self.rt
-                .block_on(self.store.get_range(&self.path, range))
-                .map_err(PyDeltaTableError::from_object_store)?
-                .to_vec()
+        let data = if nbytes > 0 {
+            py.allow_threads(|| {
+                rt().block_on(self.store.get_range(&self.path, range))
+                    .map_err(PythonError::from)
+            })?
         } else {
-            Vec::new()
+            "".into()
         };
-        Python::with_gil(|py| Ok(PyBytes::new(py, &obj).into_py(py)))
+        // TODO: PyBytes copies the buffer. If we move away from the limited CPython
+        // API (the stable C API), we could implement the buffer protocol for
+        // bytes::Bytes and return this zero-copy.
+        Ok(PyBytes::new_bound(py, data.as_ref()))
     }
 
     fn fileno(&self) -> PyResult<()> {
@@ -404,10 +503,12 @@ impl ObjectInputFile {
         Err(PyNotImplementedError::new_err("'truncate' not implemented"))
     }
 
+    #[pyo3(signature = (_size=None))]
     fn readline(&self, _size: Option<i64>) -> PyResult<()> {
         Err(PyNotImplementedError::new_err("'readline' not implemented"))
     }
 
+    #[pyo3(signature = (_hint=None))]
     fn readlines(&self, _hint: Option<i64>) -> PyResult<()> {
         Err(PyNotImplementedError::new_err(
             "'readlines' not implemented",
@@ -416,37 +517,32 @@ impl ObjectInputFile {
 }
 
 // TODO the C++ implementation track an internal lock on all random access files, DO we need this here?
-// TODO add buffer to store data ...
-#[pyclass(weakref)]
+#[pyclass(weakref, module = "deltalake._internal")]
 pub struct ObjectOutputStream {
-    store: Arc<DynObjectStore>,
-    rt: Arc<Runtime>,
-    path: Path,
-    writer: Box<dyn AsyncWrite + Send + Unpin>,
-    multipart_id: MultipartId,
+    upload: Box<dyn MultipartUpload>,
     pos: i64,
     #[pyo3(get)]
     closed: bool,
     #[pyo3(get)]
     mode: String,
+    max_buffer_size: usize,
+    buffer: PutPayloadMut,
 }
 
 impl ObjectOutputStream {
     pub async fn try_new(
-        rt: Arc<Runtime>,
         store: Arc<DynObjectStore>,
         path: Path,
+        max_buffer_size: usize,
     ) -> Result<Self, ObjectStoreError> {
-        let (multipart_id, writer) = store.put_multipart(&path).await?;
+        let upload = store.put_multipart(&path).await?;
         Ok(Self {
-            store,
-            rt,
-            path,
-            writer,
-            multipart_id,
+            upload,
             pos: 0,
             closed: false,
             mode: "wb".into(),
+            buffer: PutPayloadMut::default(),
+            max_buffer_size,
         })
     }
 
@@ -457,21 +553,38 @@ impl ObjectOutputStream {
 
         Ok(())
     }
+
+    fn abort(&mut self) -> PyResult<()> {
+        rt().block_on(self.upload.abort())
+            .map_err(PythonError::from)?;
+        Ok(())
+    }
+
+    fn upload_buffer(&mut self) -> PyResult<()> {
+        let payload = std::mem::take(&mut self.buffer).freeze();
+        match rt().block_on(self.upload.put_part(payload)) {
+            Ok(_) => Ok(()),
+            Err(err) => {
+                self.abort()?;
+                Err(PyIOError::new_err(err.to_string()))
+            }
+        }
+    }
 }
 
 #[pymethods]
 impl ObjectOutputStream {
-    fn close(&mut self) -> PyResult<()> {
-        self.closed = true;
-        match self.rt.block_on(self.writer.shutdown()) {
-            Ok(_) => Ok(()),
-            Err(err) => {
-                self.rt
-                    .block_on(self.store.abort_multipart(&self.path, &self.multipart_id))
-                    .map_err(PyDeltaTableError::from_object_store)?;
-                Err(PyDeltaTableError::from_io(err))
+    fn close(&mut self, py: Python<'_>) -> PyResult<()> {
+        py.allow_threads(|| {
+            self.closed = true;
+            if !self.buffer.is_empty() {
+                self.upload_buffer()?;
             }
-        }
+            match rt().block_on(self.upload.complete()) {
+                Ok(_) => Ok(()),
+                Err(err) => Err(PyIOError::new_err(err.to_string())),
+            }
+        })
     }
 
     fn isatty(&self) -> PyResult<bool> {
@@ -500,42 +613,51 @@ impl ObjectOutputStream {
         Err(PyNotImplementedError::new_err("'size' not implemented"))
     }
 
-    #[args(whence = "0")]
-    fn seek(&mut self, _offset: i64, _whence: i64) -> PyResult<i64> {
+    #[allow(unused_variables)]
+    #[pyo3(signature = (offset, whence = 0))]
+    fn seek(&mut self, offset: i64, whence: i64) -> PyResult<i64> {
         self.check_closed()?;
         Err(PyNotImplementedError::new_err("'seek' not implemented"))
     }
 
-    #[args(nbytes = "None")]
-    fn read(&mut self, _nbytes: Option<i64>) -> PyResult<()> {
+    #[allow(unused_variables)]
+    #[pyo3(signature = (nbytes = None))]
+    fn read(&mut self, nbytes: Option<i64>) -> PyResult<()> {
         self.check_closed()?;
         Err(PyNotImplementedError::new_err("'read' not implemented"))
     }
 
-    fn write(&mut self, data: Vec<u8>) -> PyResult<i64> {
+    fn write(&mut self, data: &Bound<'_, PyBytes>) -> PyResult<i64> {
         self.check_closed()?;
-        let len = data.len() as i64;
-        match self.rt.block_on(self.writer.write_all(&data)) {
-            Ok(_) => Ok(len),
-            Err(err) => {
-                self.rt
-                    .block_on(self.store.abort_multipart(&self.path, &self.multipart_id))
-                    .map_err(PyDeltaTableError::from_object_store)?;
-                Err(PyDeltaTableError::from_io(err))
+        let py = data.py();
+        let bytes = data.as_bytes();
+        py.allow_threads(|| {
+            let len = bytes.len();
+            for chunk in bytes.chunks(self.max_buffer_size) {
+                // this will never overflow
+                let remaining = self.max_buffer_size - self.buffer.content_length();
+                // if we have enough space to store this chunk, just append it
+                if chunk.len() < remaining {
+                    self.buffer.extend_from_slice(chunk);
+                    break;
+                }
+                // if we don't, fill as much as we can, flush the buffer, and then append the rest
+                // this won't panic since we've checked the size of the chunk
+                let (first, second) = chunk.split_at(remaining);
+                self.buffer.extend_from_slice(first);
+                self.upload_buffer()?;
+                // len(second) will always be < max_buffer_size, and we just
+                // emptied the buffer by flushing, so we won't overflow
+                // if len(chunk) just happened to be == remaining,
+                // the second slice is empty. this is a no-op
+                self.buffer.extend_from_slice(second);
             }
-        }
+            Ok(len as i64)
+        })
     }
 
-    fn flush(&mut self) -> PyResult<()> {
-        match self.rt.block_on(self.writer.flush()) {
-            Ok(_) => Ok(()),
-            Err(err) => {
-                self.rt
-                    .block_on(self.store.abort_multipart(&self.path, &self.multipart_id))
-                    .map_err(PyDeltaTableError::from_object_store)?;
-                Err(PyDeltaTableError::from_io(err))
-            }
-        }
+    fn flush(&mut self, py: Python<'_>) -> PyResult<()> {
+        py.allow_threads(|| self.upload_buffer())
     }
 
     fn fileno(&self) -> PyResult<()> {
@@ -546,10 +668,12 @@ impl ObjectOutputStream {
         Err(PyNotImplementedError::new_err("'truncate' not implemented"))
     }
 
+    #[pyo3(signature = (_size=None))]
     fn readline(&self, _size: Option<i64>) -> PyResult<()> {
         Err(PyNotImplementedError::new_err("'readline' not implemented"))
     }
 
+    #[pyo3(signature = (_hint=None))]
     fn readlines(&self, _hint: Option<i64>) -> PyResult<()> {
         Err(PyNotImplementedError::new_err(
             "'readlines' not implemented",

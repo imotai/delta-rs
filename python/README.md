@@ -1,70 +1,104 @@
-Deltalake-python
-================
+# Deltalake-python
 
 [![PyPI](https://img.shields.io/pypi/v/deltalake.svg?style=flat-square)](https://pypi.org/project/deltalake/)
-[![userdoc](https://img.shields.io/badge/docs-user-blue)](https://delta-io.github.io/delta-rs/python/)
-[![apidoc](https://img.shields.io/badge/docs-api-blue)](https://delta-io.github.io/delta-rs/python/api_reference.html)
+[![userdoc](https://img.shields.io/badge/docs-user-blue)](https://delta-io.github.io/delta-rs/)
+[![apidoc](https://img.shields.io/badge/docs-api-blue)](https://delta-io.github.io/delta-rs/api/delta_table/)
 
 Native [Delta Lake](https://delta.io/) Python binding based on
 [delta-rs](https://github.com/delta-io/delta-rs) with
 [Pandas](https://pandas.pydata.org/) integration.
 
+## Example
 
-Installation
-------------
+```python
+from deltalake import DeltaTable
+dt = DeltaTable("../rust/tests/data/delta-0.2.0")
+dt.version()
+3
+dt.files()
+['part-00000-cb6b150b-30b8-4662-ad28-ff32ddab96d2-c000.snappy.parquet',
+ 'part-00000-7c2deba3-1994-4fb8-bc07-d46c948aa415-c000.snappy.parquet',
+ 'part-00001-c373a5bd-85f0-4758-815e-7eb62007a15c-c000.snappy.parquet']
+```
+
+See the [user guide](https://delta-io.github.io/delta-rs/usage/installation/) for more examples.
+
+## Installation
 
 ```bash
+# with pip
 pip install deltalake
+# with uv
+uv add deltalake
+# with poetry
+poetry add deltalake
 ```
 
 NOTE: official binary wheels are linked against openssl statically for remote
 objection store communication. Please file Github issue to request for critical
 openssl upgrade.
 
+## Build custom wheels
 
-Develop
--------
+Sometimes you may wish to build custom wheels. Maybe you want to try out some
+unreleased features. Or maybe you want to tweak the optimization of the Rust code.
 
-#### Setup your local environment with virtualenv
-```bash
-$ make setup-venv
+To compile the package, you will need the Rust compiler and [maturin](https://github.com/PyO3/maturin):
+
+```sh
+curl https://sh.rustup.rs -sSf | sh -s
+
+Then you can build wheels for your own platform like so:
+
+```sh
+uvx maturin build --release --out wheels
 ```
 
-#### Activate it
-```bash
-$ source ./venv/bin/activate
+Note:
+
+- [`uvx`](https://docs.astral.sh/uv/guides/tools/) invokes a tool without installing it.
+- if you plan to often use `maturin`, you can install the "tool" with `uv tool install maturin`.
+
+For a build that is optimized for the system you are on (but sacrificing portability):
+
+```sh
+RUSTFLAGS="-C target-cpu=native" uvx maturin build --release --out wheels
 ```
 
-#### Ready to develop with maturin
+### Cross compilation
 
-[maturin](https://github.com/PyO3/maturin) is used to build the python package.
-Install delta-rs in the current virtualenv
+The above command only works for your current platform. To create wheels for other
+platforms, you'll need to cross compile. Cross compilation requires installing
+two additional components: to cross compile Rust code, you will need to install
+the target with `rustup`; to cross compile the Python bindings, you will need
+to install `ziglang`.
 
-```bash
-$ make develop
+The following example is for manylinux2014. Other targets will require different
+Rust `target` and Python `compatibility` tags.
+
+```sh
+rustup target add x86_64-unknown-linux-gnu
 ```
 
-Then, list all the available tasks
+Then you can build wheels for the target platform like so:
 
-```bash
-$ make help
+```sh
+uvx --from 'maturin[zig]' maturin build --release --zig \
+    --target x86_64-unknown-linux-gnu \
+    --compatibility manylinux2014 \
+    --out wheels
 ```
 
-Build manylinux wheels
-----------------------
+If you expect to only run on more modern system, you can set a newer `target-cpu`
+flag to Rust and use a newer compatibility tag for Linux. For example, here
+we set compatibility with CPUs newer than Haswell (2013) and Linux OS with
+glibc version of at least 2.24:
 
-```bash
-docker run -e PKG_CONFIG_PATH=/usr/local/lib64/pkgconfig -it -v `pwd`:/io apache/arrow-dev:amd64-centos-6.10-python-manylinux2010 bash
-curl https://sh.rustup.rs -sSf | sh -s -- -y
-source $HOME/.cargo/env
-rustup default stable
-cargo install --git https://github.com/PyO3/maturin.git --rev 98636cea89c328b3eba4ebb548124f75c8018200 maturin
-cd /io/python
-export PATH=/opt/python/cp37-cp37m/bin:/opt/python/cp38-cp38/bin:$PATH
-maturin publish -b pyo3 --target x86_64-unknown-linux-gnu --no-sdist
+```sh
+RUSTFLAGS="-C target-cpu=haswell" uvx --from 'maturin[zig]' maturin build --release --zig \
+    --target x86_64-unknown-linux-gnu \
+    --compatibility manylinux_2_24 \
+    --out wheels
 ```
 
-#### PyPI release
-
-Publish a new GitHub release with name and tag version set to `python-vx.y.z`.
-This will trigger our automated release pipeline.
+See note about `RUSTFLAGS` from [the arrow-rs readme](https://github.com/apache/arrow-rs/blob/master/arrow/README.md#performance-tips).
