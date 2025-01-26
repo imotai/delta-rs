@@ -1,132 +1,781 @@
-import sys
-from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple, Union
+from enum import Enum
+from typing import Any, Dict, List, Literal, Mapping, Optional, Tuple, Union
 
-if sys.version_info >= (3, 8):
-    from typing import Literal
-else:
-    from typing_extensions import Literal
-
-import pyarrow as pa
+import pyarrow
 import pyarrow.fs as fs
 
-from deltalake.writer import AddAction
+from deltalake.writer import (
+    AddAction,
+    CommitProperties,
+    PostCommitHookProperties,
+    WriterProperties,
+)
 
-RawDeltaTable: Any
-rust_core_version: Callable[[], str]
+__version__: str
 
-class PyDeltaTableError(BaseException): ...
+class TableFeatures(Enum):
+    # Mapping of one column to another
+    ColumnMapping = "ColumnMapping"
+    # Deletion vectors for merge, update, delete
+    DeletionVectors = "DeletionVectors"
+    # timestamps without timezone support
+    TimestampWithoutTimezone = "TimestampWithoutTimezone"
+    # version 2 of checkpointing
+    V2Checkpoint = "V2Checkpoint"
+    # Append Only Tables
+    AppendOnly = "AppendOnly"
+    # Table invariants
+    Invariants = "Invariants"
+    # Check constraints on columns
+    CheckConstraints = "CheckConstraints"
+    # CDF on a table
+    ChangeDataFeed = "ChangeDataFeed"
+    # Columns with generated values
+    GeneratedColumns = "GeneratedColumns"
+    # ID Columns
+    IdentityColumns = "IdentityColumns"
+    # Row tracking on tables
+    RowTracking = "RowTracking"
+    # domain specific metadata
+    DomainMetadata = "DomainMetadata"
+    # Iceberg compatibility support
+    IcebergCompatV1 = "IcebergCompatV1"
 
-write_new_deltalake: Callable[
-    [
-        str,
-        pa.Schema,
-        List[AddAction],
-        str,
-        List[str],
-        Optional[str],
-        Optional[str],
-        Optional[Mapping[str, Optional[str]]],
-        Optional[Dict[str, str]],
-    ],
-    None,
-]
+class RawDeltaTableMetaData:
+    id: int
+    name: str
+    description: str
+    partition_columns: List[str]
+    created_time: int
+    configuration: Dict[str, str]
+
+class RawDeltaTable:
+    schema: Any
+
+    def __init__(
+        self,
+        table_uri: str,
+        version: Optional[int],
+        storage_options: Optional[Dict[str, str]],
+        without_files: bool,
+        log_buffer_size: Optional[int],
+    ) -> None: ...
+    @staticmethod
+    def get_table_uri_from_data_catalog(
+        data_catalog: str,
+        database_name: str,
+        table_name: str,
+        data_catalog_id: Optional[str] = None,
+        catalog_options: Optional[Dict[str, str]] = None,
+    ) -> str: ...
+    @staticmethod
+    def is_deltatable(
+        table_uri: str, storage_options: Optional[Dict[str, str]]
+    ) -> bool: ...
+    def table_uri(self) -> str: ...
+    def version(self) -> int: ...
+    def has_files(self) -> bool: ...
+    def get_add_file_sizes(self) -> Dict[str, int]: ...
+    def get_latest_version(self) -> int: ...
+    def get_earliest_version(self) -> int: ...
+    def get_num_index_cols(self) -> int: ...
+    def get_stats_columns(self) -> Optional[List[str]]: ...
+    def metadata(self) -> RawDeltaTableMetaData: ...
+    def protocol_versions(self) -> List[Any]: ...
+    def load_version(self, version: int) -> None: ...
+    def load_with_datetime(self, ds: str) -> None: ...
+    def files(self, partition_filters: Optional[PartitionFilterType]) -> List[str]: ...
+    def file_uris(
+        self, partition_filters: Optional[PartitionFilterType]
+    ) -> List[str]: ...
+    def vacuum(
+        self,
+        dry_run: bool,
+        retention_hours: Optional[int],
+        enforce_retention_duration: bool,
+        commit_properties: Optional[CommitProperties],
+        post_commithook_properties: Optional[PostCommitHookProperties],
+    ) -> List[str]: ...
+    def compact_optimize(
+        self,
+        partition_filters: Optional[PartitionFilterType],
+        target_size: Optional[int],
+        max_concurrent_tasks: Optional[int],
+        min_commit_interval: Optional[int],
+        writer_properties: Optional[WriterProperties],
+        commit_properties: Optional[CommitProperties],
+        post_commithook_properties: Optional[PostCommitHookProperties],
+    ) -> str: ...
+    def z_order_optimize(
+        self,
+        z_order_columns: List[str],
+        partition_filters: Optional[PartitionFilterType],
+        target_size: Optional[int],
+        max_concurrent_tasks: Optional[int],
+        max_spill_size: Optional[int],
+        min_commit_interval: Optional[int],
+        writer_properties: Optional[WriterProperties],
+        commit_properties: Optional[CommitProperties],
+        post_commithook_properties: Optional[PostCommitHookProperties],
+    ) -> str: ...
+    def add_columns(
+        self,
+        fields: List[Field],
+        commit_properties: Optional[CommitProperties],
+        post_commithook_properties: Optional[PostCommitHookProperties],
+    ) -> None: ...
+    def add_feature(
+        self,
+        feature: List[TableFeatures],
+        allow_protocol_versions_increase: bool,
+        commit_properties: Optional[CommitProperties],
+        post_commithook_properties: Optional[PostCommitHookProperties],
+    ) -> None: ...
+    def add_constraints(
+        self,
+        constraints: Dict[str, str],
+        commit_properties: Optional[CommitProperties],
+        post_commithook_properties: Optional[PostCommitHookProperties],
+    ) -> None: ...
+    def drop_constraints(
+        self,
+        name: str,
+        raise_if_not_exists: bool,
+        commit_properties: Optional[CommitProperties],
+        post_commithook_properties: Optional[PostCommitHookProperties],
+    ) -> None: ...
+    def set_table_properties(
+        self,
+        properties: Dict[str, str],
+        raise_if_not_exists: bool,
+        commit_properties: Optional[CommitProperties],
+    ) -> None: ...
+    def restore(
+        self,
+        target: Optional[Any],
+        ignore_missing_files: bool,
+        protocol_downgrade_allowed: bool,
+        commit_properties: Optional[CommitProperties],
+    ) -> str: ...
+    def history(self, limit: Optional[int]) -> List[str]: ...
+    def update_incremental(self) -> None: ...
+    def dataset_partitions(
+        self, schema: pyarrow.Schema, partition_filters: Optional[FilterConjunctionType]
+    ) -> List[Any]: ...
+    def create_checkpoint(self) -> None: ...
+    def get_add_actions(self, flatten: bool) -> pyarrow.RecordBatch: ...
+    def delete(
+        self,
+        predicate: Optional[str],
+        writer_properties: Optional[WriterProperties],
+        commit_properties: Optional[CommitProperties],
+        post_commithook_properties: Optional[PostCommitHookProperties],
+    ) -> str: ...
+    def repair(
+        self,
+        dry_run: bool,
+        commit_properties: Optional[CommitProperties],
+        post_commithook_properties: Optional[PostCommitHookProperties],
+    ) -> str: ...
+    def update(
+        self,
+        updates: Dict[str, str],
+        predicate: Optional[str],
+        writer_properties: Optional[WriterProperties],
+        safe_cast: bool,
+        commit_properties: Optional[CommitProperties],
+        post_commithook_properties: Optional[PostCommitHookProperties],
+    ) -> str: ...
+    def create_merge_builder(
+        self,
+        source: pyarrow.RecordBatchReader,
+        predicate: str,
+        source_alias: Optional[str],
+        target_alias: Optional[str],
+        writer_properties: Optional[WriterProperties],
+        commit_properties: Optional[CommitProperties],
+        post_commithook_properties: Optional[PostCommitHookProperties],
+        safe_cast: bool,
+        streaming: bool,
+    ) -> PyMergeBuilder: ...
+    def merge_execute(self, merge_builder: PyMergeBuilder) -> str: ...
+    def get_active_partitions(
+        self, partitions_filters: Optional[FilterType] = None
+    ) -> Any: ...
+    def create_write_transaction(
+        self,
+        add_actions: List[AddAction],
+        mode: str,
+        partition_by: List[str],
+        schema: pyarrow.Schema,
+        partitions_filters: Optional[FilterType],
+        commit_properties: Optional[CommitProperties],
+        post_commithook_properties: Optional[PostCommitHookProperties],
+    ) -> None: ...
+    def cleanup_metadata(self) -> None: ...
+    def check_can_write_timestamp_ntz(self, schema: pyarrow.Schema) -> None: ...
+    def load_cdf(
+        self,
+        columns: Optional[List[str]] = None,
+        starting_version: int = 0,
+        ending_version: Optional[int] = None,
+        starting_timestamp: Optional[str] = None,
+        ending_timestamp: Optional[str] = None,
+        allow_out_of_range: bool = False,
+    ) -> pyarrow.RecordBatchReader: ...
+    def transaction_versions(self) -> Dict[str, Transaction]: ...
+    def __datafusion_table_provider__(self) -> Any: ...
+
+def rust_core_version() -> str: ...
+def write_new_deltalake(
+    table_uri: str,
+    schema: pyarrow.Schema,
+    add_actions: List[AddAction],
+    _mode: str,
+    partition_by: List[str],
+    name: Optional[str],
+    description: Optional[str],
+    configuration: Optional[Mapping[str, Optional[str]]],
+    storage_options: Optional[Dict[str, str]],
+    custom_metadata: Optional[Dict[str, str]],
+) -> None: ...
+def write_to_deltalake(
+    table_uri: str,
+    data: pyarrow.RecordBatchReader,
+    partition_by: Optional[List[str]],
+    mode: str,
+    table: Optional[RawDeltaTable],
+    schema_mode: Optional[str],
+    predicate: Optional[str],
+    target_file_size: Optional[int],
+    name: Optional[str],
+    description: Optional[str],
+    configuration: Optional[Mapping[str, Optional[str]]],
+    storage_options: Optional[Dict[str, str]],
+    writer_properties: Optional[WriterProperties],
+    commit_properties: Optional[CommitProperties],
+    post_commithook_properties: Optional[PostCommitHookProperties],
+) -> None: ...
+def convert_to_deltalake(
+    uri: str,
+    partition_by: Optional[pyarrow.Schema],
+    partition_strategy: Optional[Literal["hive"]],
+    name: Optional[str],
+    description: Optional[str],
+    configuration: Optional[Mapping[str, Optional[str]]],
+    storage_options: Optional[Dict[str, str]],
+    custom_metadata: Optional[Dict[str, str]],
+) -> None: ...
+def create_deltalake(
+    table_uri: str,
+    schema: pyarrow.Schema,
+    partition_by: List[str],
+    mode: str,
+    raise_if_key_not_exists: bool,
+    name: Optional[str],
+    description: Optional[str],
+    configuration: Optional[Mapping[str, Optional[str]]],
+    storage_options: Optional[Dict[str, str]],
+    custom_metadata: Optional[Dict[str, str]],
+) -> None: ...
+def batch_distinct(batch: pyarrow.RecordBatch) -> pyarrow.RecordBatch: ...
+def get_num_idx_cols_and_stats_columns(
+    table: Optional[RawDeltaTable], configuration: Optional[Mapping[str, Optional[str]]]
+) -> Tuple[int, Optional[List[str]]]: ...
+
+class PyMergeBuilder:
+    source_alias: str
+    target_alias: str
+    arrow_schema: pyarrow.Schema
+
+    def when_matched_update(
+        self, updates: Dict[str, str], predicate: Optional[str]
+    ) -> None: ...
+    def when_matched_delete(self, predicate: Optional[str]) -> None: ...
+    def when_not_matched_insert(
+        self, updates: Dict[str, str], predicate: Optional[str]
+    ) -> None: ...
+    def when_not_matched_by_source_update(
+        self, updates: Dict[str, str], predicate: Optional[str]
+    ) -> None: ...
+    def when_not_matched_by_source_delete(
+        self,
+        predicate: Optional[str],
+    ) -> None: ...
 
 # Can't implement inheritance (see note in src/schema.rs), so this is next
 # best thing.
 DataType = Union["PrimitiveType", "MapType", "StructType", "ArrayType"]
 
 class PrimitiveType:
+    """A primitive datatype, such as a string or number.
+
+    Can be initialized with a string value:
+
+    ```
+    PrimitiveType("integer")
+    ```
+
+    Valid primitive data types include:
+
+     * "string",
+     * "long",
+     * "integer",
+     * "short",
+     * "byte",
+     * "float",
+     * "double",
+     * "boolean",
+     * "binary",
+     * "date",
+     * "timestamp",
+     * "timestampNtz",
+     * "decimal(<precision>, <scale>)" Max: decimal(38,38)
+
+    Args:
+        data_type: string representation of the data type
+    """
+
     def __init__(self, data_type: str) -> None: ...
     type: str
+    """ The inner type
+    """
 
     def to_json(self) -> str: ...
     @staticmethod
-    def from_json(json: str) -> "PrimitiveType": ...
-    def to_pyarrow(self) -> pa.DataType: ...
+    def from_json(json: str) -> PrimitiveType:
+        """Create a PrimitiveType from a JSON string
+
+        The JSON representation for a primitive type is just a quoted string: `PrimitiveType.from_json('"integer"')`
+
+        Args:
+            json: a JSON string
+
+        Returns:
+            a PrimitiveType type
+        """
+    def to_pyarrow(self) -> pyarrow.DataType:
+        """Get the equivalent PyArrow type (pyarrow.DataType)"""
     @staticmethod
-    def from_pyarrow(type: pa.DataType) -> "PrimitiveType": ...
+    def from_pyarrow(type: pyarrow.DataType) -> PrimitiveType:
+        """Create a PrimitiveType from a PyArrow datatype
+
+        Will raise `TypeError` if the PyArrow type is not a primitive type.
+
+        Args:
+            type: A PyArrow DataType
+
+        Returns:
+            a PrimitiveType
+        """
 
 class ArrayType:
+    """An Array (List) DataType
+
+    Example:
+        Can either pass the element type explicitly or can pass a string
+        if it is a primitive type:
+        ```python
+        ArrayType(PrimitiveType("integer"))
+        # Returns ArrayType(PrimitiveType("integer"), contains_null=True)
+
+        ArrayType("integer", contains_null=False)
+        # Returns ArrayType(PrimitiveType("integer"), contains_null=False)
+        ```
+    """
+
     def __init__(
         self, element_type: DataType, *, contains_null: bool = True
     ) -> None: ...
     type: Literal["array"]
-    element_type: DataType
-    contains_null: bool
+    """ The string "array"
+    """
 
-    def to_json(self) -> str: ...
+    element_type: DataType
+    """ The type of the element, of type: 
+        Union[
+            [PrimitiveType][deltalake.schema.PrimitiveType], 
+            [ArrayType][deltalake.schema.ArrayType], 
+            [MapType][deltalake.schema.MapType], 
+            [StructType][deltalake.schema.StructType]
+        ]
+    """
+
+    contains_null: bool
+    """ Whether the arrays may contain null values
+    """
+
+    def to_json(self) -> str:
+        """Get the JSON string representation of the type."""
     @staticmethod
-    def from_json(json: str) -> "ArrayType": ...
+    def from_json(json: str) -> "ArrayType":
+        """Create an ArrayType from a JSON string
+
+        Args:
+            json: a JSON string
+
+        Returns:
+            an ArrayType
+
+        Example:
+            The JSON representation for an array type is an object with `type` (set to
+            `"array"`), `elementType`, and `containsNull`.
+            ```python
+            ArrayType.from_json(
+                '''{
+                    "type": "array",
+                    "elementType": "integer",
+                    "containsNull": false
+                }'''
+            )
+            # Returns ArrayType(PrimitiveType("integer"), contains_null=False)
+            ```
+        """
     def to_pyarrow(
         self,
-    ) -> pa.ListType: ...
+    ) -> pyarrow.ListType:
+        """Get the equivalent PyArrow type."""
     @staticmethod
-    def from_pyarrow(type: pa.ListType) -> "ArrayType": ...
+    def from_pyarrow(type: pyarrow.ListType) -> ArrayType:
+        """Create an ArrayType from a pyarrow.ListType.
+
+        Will raise `TypeError` if a different PyArrow DataType is provided.
+
+        Args:
+            type: The PyArrow ListType
+
+        Returns:
+            an ArrayType
+        """
 
 class MapType:
+    """A map data type
+
+    `key_type` and `value_type` should be [PrimitiveType][deltalake.schema.PrimitiveType], [ArrayType][deltalake.schema.ArrayType],
+    or [StructType][deltalake.schema.StructType]. A string can also be passed, which will be
+    parsed as a primitive type:
+
+    Example:
+        ```python
+        MapType(PrimitiveType("integer"), PrimitiveType("string"))
+        # Returns MapType(PrimitiveType("integer"), PrimitiveType("string"), value_contains_null=True)
+
+        MapType("integer", "string", value_contains_null=False)
+        # Returns MapType(PrimitiveType("integer"), PrimitiveType("string"), value_contains_null=False)
+        ```
+    """
+
     def __init__(
         self,
         key_type: DataType,
         value_type: DataType,
         *,
-        value_contains_null: bool = True
+        value_contains_null: bool = True,
     ) -> None: ...
     type: Literal["map"]
     key_type: DataType
-    value_type: DataType
-    value_contains_null: bool
+    """ The type of the keys, of type: 
+        Union[
+            [PrimitiveType][deltalake.schema.PrimitiveType], 
+            [ArrayType][deltalake.schema.ArrayType], 
+            [MapType][deltalake.schema.MapType], 
+            [StructType][deltalake.schema.StructType]
+        ]
+    """
 
-    def to_json(self) -> str: ...
+    value_type: DataType
+    """The type of the values, of type: 
+        Union[
+            [PrimitiveType][deltalake.schema.PrimitiveType], 
+            [ArrayType][deltalake.schema.ArrayType], 
+            [MapType][deltalake.schema.MapType], 
+            [StructType][deltalake.schema.StructType]
+        ]
+    """
+
+    value_contains_null: bool
+    """ Whether the values in a map may be null
+    """
+
+    def to_json(self) -> str:
+        """Get JSON string representation of map type.
+
+        Returns:
+            a JSON string
+        """
     @staticmethod
-    def from_json(json: str) -> "MapType": ...
-    def to_pyarrow(self) -> pa.MapType: ...
+    def from_json(json: str) -> MapType:
+        """Create a MapType from a JSON string
+
+        Args:
+            json: a JSON string
+
+        Returns:
+            an ArrayType
+
+        Example:
+            The JSON representation for a map type is an object with `type` (set to `map`),
+            `keyType`, `valueType`, and `valueContainsNull`:
+
+            ```python
+            MapType.from_json(
+                '''{
+                    "type": "map",
+                    "keyType": "integer",
+                    "valueType": "string",
+                    "valueContainsNull": true
+                }'''
+            )
+            # Returns MapType(PrimitiveType("integer"), PrimitiveType("string"), value_contains_null=True)
+            ```
+        """
+    def to_pyarrow(self) -> pyarrow.MapType:
+        """Get the equivalent PyArrow data type."""
     @staticmethod
-    def from_pyarrow(type: pa.MapType) -> "MapType": ...
+    def from_pyarrow(type: pyarrow.MapType) -> MapType:
+        """Create a MapType from a PyArrow MapType.
+
+        Will raise `TypeError` if passed a different type.
+
+        Args:
+            type: the PyArrow MapType
+
+        Returns:
+            a MapType
+        """
 
 class Field:
+    """A field in a Delta StructType or Schema
+
+    Example:
+        Can create with just a name and a type:
+        ```python
+        Field("my_int_col", "integer")
+        # Returns Field("my_int_col", PrimitiveType("integer"), nullable=True, metadata=None)
+        ```
+
+        Can also attach metadata to the field. Metadata should be a dictionary with
+        string keys and JSON-serializable values (str, list, int, float, dict):
+
+        ```python
+        Field("my_col", "integer", metadata={"custom_metadata": {"test": 2}})
+        # Returns Field("my_col", PrimitiveType("integer"), nullable=True, metadata={"custom_metadata": {"test": 2}})
+        ```
+    """
+
     def __init__(
         self,
         name: str,
         type: DataType,
         *,
         nullable: bool = True,
-        metadata: Optional[Dict[str, Any]] = None
+        metadata: Optional[Dict[str, Any]] = None,
     ) -> None: ...
     name: str
-    type: DataType
-    nullable: bool
-    metadata: Dict[str, Any]
+    """ The name of the field
+    """
 
-    def to_json(self) -> str: ...
+    type: DataType
+    """ The type of the field, of type: 
+        Union[
+            [PrimitiveType][deltalake.schema.PrimitiveType], 
+            [ArrayType][deltalake.schema.ArrayType], 
+            [MapType][deltalake.schema.MapType], 
+            [StructType][deltalake.schema.StructType]
+        ]
+    """
+
+    nullable: bool
+    """ Whether there may be null values in the field
+    """
+
+    metadata: Dict[str, Any]
+    """ The metadata of the field
+    """
+
+    def to_json(self) -> str:
+        """Get the field as JSON string.
+
+        Returns:
+            a JSON string
+
+        Example:
+            ```python
+            Field("col", "integer").to_json()
+            # Returns '{"name":"col","type":"integer","nullable":true,"metadata":{}}'
+            ```
+        """
     @staticmethod
-    def from_json(json: str) -> "Field": ...
-    def to_pyarrow(self) -> pa.Field: ...
+    def from_json(json: str) -> Field:
+        """Create a Field from a JSON string.
+
+        Args:
+            json: the JSON string.
+
+        Returns:
+            Field
+
+        Example:
+            ```
+            Field.from_json('''{
+                    "name": "col",
+                    "type": "integer",
+                    "nullable": true,
+                    "metadata": {}
+                }'''
+            )
+            # Returns Field(col, PrimitiveType("integer"), nullable=True)
+            ```
+        """
+    def to_pyarrow(self) -> pyarrow.Field:
+        """Convert to an equivalent PyArrow field
+        Note: This currently doesn't preserve field metadata.
+
+        Returns:
+            a pyarrow Field
+        """
     @staticmethod
-    def from_pyarrow(type: pa.Field) -> "Field": ...
+    def from_pyarrow(field: pyarrow.Field) -> Field:
+        """Create a Field from a PyArrow field
+        Note: This currently doesn't preserve field metadata.
+
+        Args:
+            field: a PyArrow Field
+
+        Returns:
+            a Field
+        """
 
 class StructType:
+    """A struct datatype, containing one or more subfields
+
+    Example:
+        Create with a list of :class:`Field`:
+        ```python
+        StructType([Field("x", "integer"), Field("y", "string")])
+        # Creates: StructType([Field(x, PrimitiveType("integer"), nullable=True), Field(y, PrimitiveType("string"), nullable=True)])
+        ```
+    """
+
     def __init__(self, fields: List[Field]) -> None: ...
     type: Literal["struct"]
     fields: List[Field]
+    """ The fields within the struct
+    """
 
-    def to_json(self) -> str: ...
+    def to_json(self) -> str:
+        """Get the JSON representation of the type.
+
+        Returns:
+            a JSON string
+
+        Example:
+            ```python
+            StructType([Field("x", "integer")]).to_json()
+            # Returns '{"type":"struct","fields":[{"name":"x","type":"integer","nullable":true,"metadata":{}}]}'
+            ```
+        """
     @staticmethod
-    def from_json(json: str) -> "StructType": ...
-    def to_pyarrow(self) -> pa.StructType: ...
+    def from_json(json: str) -> StructType:
+        """Create a new StructType from a JSON string.
+
+        Args:
+            json: a JSON string
+
+        Returns:
+            a StructType
+
+        Example:
+            ```python
+            StructType.from_json(
+                '''{
+                    "type": "struct",
+                    "fields": [{"name": "x", "type": "integer", "nullable": true, "metadata": {}}]
+                }'''
+            )
+            # Returns StructType([Field(x, PrimitiveType("integer"), nullable=True)])
+            ```
+        """
+    def to_pyarrow(self) -> pyarrow.StructType:
+        """Get the equivalent PyArrow StructType
+
+        Returns:
+            a PyArrow StructType
+        """
     @staticmethod
-    def from_pyarrow(type: pa.StructType) -> "StructType": ...
+    def from_pyarrow(type: pyarrow.StructType) -> StructType:
+        """Create a new StructType from a PyArrow struct type.
+
+        Will raise `TypeError` if a different data type is provided.
+
+        Args:
+            type: a PyArrow struct type.
+
+        Returns:
+            a StructType
+        """
 
 class Schema:
     def __init__(self, fields: List[Field]) -> None: ...
     fields: List[Field]
-    invariants: List[Tuple[str, str]]
 
-    def to_json(self) -> str: ...
+    invariants: List[Tuple[str, str]]
+    """ The list of invariants on the table. Each invarint is a tuple of strings. The first string is the
+        field path and the second is the SQL of the invariant.
+    """
+    def to_json(self) -> str:
+        """Get the JSON string representation of the Schema.
+
+        Returns:
+            a JSON string
+
+        Example:
+            A schema has the same JSON format as a StructType.
+            ```python
+            Schema([Field("x", "integer")]).to_json()
+            # Returns '{"type":"struct","fields":[{"name":"x","type":"integer","nullable":true,"metadata":{}}]}'
+            ```
+        """
     @staticmethod
-    def from_json(json: str) -> "Schema": ...
-    def to_pyarrow(self) -> pa.Schema: ...
+    def from_json(json: str) -> Schema:
+        """Create a new Schema from a JSON string.
+
+        Args:
+            json: a JSON string
+
+        Example:
+            A schema has the same JSON format as a StructType.
+            ```python
+            Schema.from_json('''{
+                "type": "struct",
+                "fields": [{"name": "x", "type": "integer", "nullable": true, "metadata": {}}]
+                }
+            )'''
+            # Returns Schema([Field(x, PrimitiveType("integer"), nullable=True)])
+            ```
+        """
+    def to_pyarrow(self, as_large_types: bool = False) -> pyarrow.Schema:
+        """Return equivalent PyArrow schema
+
+        Args:
+            as_large_types: get schema with all variable size types (list, binary, string) as large variants (with int64 indices).
+                This is for compatibility with systems like Polars that only support the large versions of Arrow types.
+
+        Returns:
+            a PyArrow Schema
+        """
     @staticmethod
-    def from_pyarrow(type: pa.Schema) -> "Schema": ...
+    def from_pyarrow(type: pyarrow.Schema) -> Schema:
+        """Create a [Schema][deltalake.schema.Schema] from a PyArrow Schema type
+
+        Will raise `TypeError` if the PyArrow type is not a primitive type.
+
+        Args:
+            type: A PyArrow Schema
+
+        Returns:
+            a Schema
+        """
 
 class ObjectInputFile:
     @property
@@ -157,9 +806,21 @@ class ObjectOutputStream:
     def write(self, data: bytes) -> int: ...
 
 class DeltaFileSystemHandler:
-    """Implementation of pyarrow.fs.FileSystemHandler for use with pyarrow.fs.PyFileSystem"""
+    """Implementation of [pyarrow.fs.FileSystemHandler][pyarrow.fs.FileSystemHandler] for use with [pyarrow.fs.PyFileSystem][pyarrow.fs.PyFileSystem]"""
 
-    def __init__(self, root: str, options: dict[str, str] | None = None) -> None: ...
+    def __init__(
+        self,
+        table_uri: str,
+        options: Dict[str, str] | None = None,
+        known_sizes: Dict[str, int] | None = None,
+    ) -> None: ...
+    @classmethod
+    def from_table(
+        cls,
+        table: RawDeltaTable,
+        options: Dict[str, str] | None = None,
+        known_sizes: Dict[str, int] | None = None,
+    ) -> "DeltaFileSystemHandler": ...
     def get_type_name(self) -> str: ...
     def copy_file(self, src: str, dst: str) -> None:
         """Copy a file.
@@ -211,10 +872,55 @@ class DeltaFileSystemHandler:
     def open_input_file(self, path: str) -> ObjectInputFile:
         """Open an input file for random access reading."""
     def open_output_stream(
-        self, path: str, metadata: dict[str, str] | None = None
+        self, path: str, metadata: Dict[str, str] | None = None
     ) -> ObjectOutputStream:
         """Open an output stream for sequential writing."""
 
+class PyQueryBuilder:
+    def __init__(self) -> None: ...
+    def register(self, table_name: str, delta_table: RawDeltaTable) -> None: ...
+    def execute(self, sql: str) -> List[pyarrow.RecordBatch]: ...
+
 class DeltaDataChecker:
     def __init__(self, invariants: List[Tuple[str, str]]) -> None: ...
-    def check_batch(self, batch: pa.RecordBatch) -> None: ...
+    def check_batch(self, batch: pyarrow.RecordBatch) -> None: ...
+
+class DeltaError(Exception):
+    """The base class for Delta-specific errors."""
+
+    pass
+
+class TableNotFoundError(DeltaError):
+    """Raised when a Delta table cannot be loaded from a location."""
+
+    pass
+
+class CommitFailedError(DeltaError):
+    """Raised when a commit to a Delta table fails."""
+
+    pass
+
+class DeltaProtocolError(DeltaError):
+    """Raised when a violation with the Delta protocol specs ocurred."""
+
+    pass
+
+class SchemaMismatchError(DeltaError):
+    """Raised when a schema mismatch is detected."""
+
+    pass
+
+FilterLiteralType = Tuple[str, str, Any]
+FilterConjunctionType = List[FilterLiteralType]
+FilterDNFType = List[FilterConjunctionType]
+FilterType = Union[FilterConjunctionType, FilterDNFType]
+PartitionFilterType = List[Tuple[str, str, Union[str, List[str]]]]
+
+class Transaction:
+    app_id: str
+    version: int
+    last_updated: Optional[int]
+
+    def __init__(
+        self, app_id: str, version: int, last_updated: Optional[int] = None
+    ) -> None: ...
