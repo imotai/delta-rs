@@ -1,7 +1,7 @@
 [package]
 name = "deltalake-python"
-version = "0.6.4"
-authors = ["Qingping Hou <dave2008713@gmail.com>"]
+version = "0.24.1"
+authors = ["Qingping Hou <dave2008713@gmail.com>", "Will Jones <willjones127@gmail.com>"]
 homepage = "https://github.com/delta-io/delta-rs"
 license = "Apache-2.0"
 description = "Native Delta Lake Python binding based on delta-rs with Pandas integration"
@@ -12,29 +12,64 @@ keywords = ["deltalake", "delta", "datalake", "pandas", "arrow"]
 [lib]
 name = "deltalake"
 crate-type = ["cdylib"]
-
-[package.metadata.maturin]
-name = "deltalake._internal"
+doc = false
 
 [dependencies]
-arrow-schema = { version = "28", features = ["serde"] }
-chrono = "0"
-env_logger = "0"
-futures = "0.3"
-lazy_static = "1"
-regex = "1"
-serde_json = "1"
-tokio = { version = "1", features = ["rt-multi-thread"] }
+delta_kernel.workspace = true
 
-# reqwest is pulled in by azure sdk, but not used by python binding itself
-# for binary wheel best practice, statically link openssl
-reqwest = { version = "*", features = ["native-tls-vendored"] }
+# arrow
+arrow-schema = { workspace = true, features = ["serde"] }
+
+# datafusion
+datafusion-ffi = { workspace = true }
+
+# serde
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# "stdlib"
+chrono = { workspace = true }
+env_logger = "0"
+regex = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true, features = ["serde", "v4"] }
+parking_lot = "0.12"
+
+# runtime
+futures = { workspace = true }
+num_cpus = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread"] }
+
+deltalake-mount = { path = "../crates/mount" }
+
+# Non-unix or emscripten os
+[target.'cfg(any(not(target_family = "unix"), target_os = "emscripten"))'.dependencies]
+mimalloc = { version = "0.1", default-features = false }
+
+# Unix (excluding macOS & emscripten) → jemalloc 
+[target.'cfg(all(target_family = "unix", not(target_os = "macos"), not(target_os = "emscripten")))'.dependencies]
+jemallocator = { version = "0.5", features = ["disable_initial_exec_tls", "background_threads"] }
+
+# macOS → jemalloc (without background_threads) (https://github.com/jemalloc/jemalloc/issues/843)
+[target.'cfg(all(target_family = "unix", target_os = "macos"))'.dependencies]
+jemallocator = { version = "0.5", features = ["disable_initial_exec_tls"] }
 
 [dependencies.pyo3]
-version = "0.17"
-features = ["extension-module", "abi3", "abi3-py37"]
+version = "0.23.4"
+features = ["extension-module", "abi3", "abi3-py39"]
 
 [dependencies.deltalake]
-path = "../rust"
+path = "../crates/deltalake"
 version = "0"
-features = ["s3", "azure", "glue", "gcs", "python", "datafusion-ext"]
+features = ["azure", "gcs", "python", "datafusion", "unity-experimental", "hdfs", "lakefs"]
+
+[features]
+default = ["rustls"]
+native-tls = ["deltalake/s3-native-tls", "deltalake/glue"]
+rustls = ["deltalake/s3", "deltalake/glue"]
+
+[profile.release]
+opt-level = 3
+codegen-units = 1
+lto = "fat"
