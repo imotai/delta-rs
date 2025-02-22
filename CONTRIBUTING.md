@@ -1,48 +1,94 @@
 # Contributing to delta-rs
 
-Development on this project is mostly driven by volunteer contributors. We welcome new contributors, including not only those who develop new features, but also those who are able to help with documentation and provide detailed bug reports. 
+Development on this project is mostly driven by volunteer contributors. We welcome new contributors, including not only those who develop new features, but also those who are able to help with documentation and provide detailed bug reports.
 
 Please take note of our [code of conduct](CODE_OF_CONDUCT.md).
 
-## Good first issues 
+If you want to start contributing, first look at our good first issues: https://github.com/delta-io/delta-rs/contribute
 
-These projects have been scoped and are available for new contributors to work on. If you are new to the project, consider picking one of these up. You can comment in the issue (linked) to claim it and ask any questions there; we are happy to guide your implementation.
+If you want to contribute something more substantial, see our "Projects seeking contributors" section on our roadmap: https://github.com/delta-io/delta-rs/issues/1128
 
-* [ ] Write Rust user guide (#831): get the Rust docs homepage up to par with the Python user guide.
-* [ ] Publish Python bindings to Conda (#735)
-* [ ] Implement batch delete for faster vacuum (#408 / #407)
-* [ ] Improve Python writer Pandas support (#686)
-* [ ] Simple delete transactions (#832)
+## Claiming an issue
 
-This list was last updated in September 2022. See more good first issues here: https://github.com/delta-io/delta-rs/contribute
+If you want to claim an issue to work on, you can write the word `take` as a comment in it and you will be automatically assigned.
 
-And if you have an idea, feel free to open a new issue to discuss it.
+## Quick start
 
-## Roadmap 2022H2
+- Install Rust, e.g. as described [here](https://doc.rust-lang.org/cargo/getting-started/installation.html)
+- Have a compatible Python version installed (check `python/pyproject.toml` for current requirement)
+- Create a Python virtual environment (required for development builds), e.g. as described [here](https://packaging.python.org/en/latest/guides/installing-using-pip-and-virtual-environments/)
+    ```sh
+    python -m venv .venv
+    ```
 
-These projects have been scoped and a contributor(s) who will work on them. They are also reflected on the official Delta Lake roadmap: https://delta.io/roadmap/
+- Build the project for development (this requires an active virtual environment and will also install `deltalake` in that virtual environment. [Uv](https://github.com/astral-sh/uv) packet manager needs to be installed)
+    ```sh
+    cd python
+    make develop
+    ```
 
-* [x] (P0) **Support V2 writer protocol** (#575; @wjones127) 2022H2
-* [ ] (P1) **Data Acceptance Tests running** in CI (@wjones127) P0 for 2023H1 & P1 for 2022H2
-* [ ] (P0) **First pass at Rust documentation**: Create some basic documentation that shows how to create a Delta Lake, how to read a Delta Lake into a Polars DataFrame, and how to append a Polars DataFrame to an existing Delta Lake.  Publish the Rust documentation, so it’s easily accessible. (@MrPowers) 
-* [ ] (P0) **Blogging for Rust community**: grow Delta Rust awareness in the Rust community by blogging and posting in the Rust subreddit (@MrPowers)
-* [ ] (P0) **Fully protocol compliant optimistic commit protocol (conflict resolution)**. - (#632) (@roeap) 2023H1 P0 for 2023H1 & P1 for 2022H2
-* [ ] (P0) **Refactor Rust writer API to be flexible for others wishing to build upon delta-rs.** (#851) Separate three layers: First, a transaction layer for those who want to use their own Parquet writer to handle data writes (you write data; we write transaction); second, a parametrized writer layer, who want to use their own query engine but will use the built-in data writer (you verify data; we write data and transaction); third, a DataFusion-based writer that handles everything (verification, writing, transaction). Ideally we can design this so that delta-rs does most of the work enforcing the Delta Lake protocol (make it hard to mess up the table; possibly provide a test suite). (@wjones127, @roeap) 2023H1
-* [ ] (P2) **Release improvements:** Commit to releasing more often; On Rust, at least in cadence with arrow-rs and datafusion. Enhance the change log. Try out dev releases of Python module. (@wjones127, @roeap) 2022H1
+- Run some Python code, e.g. to run a specific test
+    ```sh
+    python -m pytest tests/test_writer.py -s -k "test_with_deltalake_schema"
+    ```
 
-## Backlog
+- Run some Rust code, e.g. run an example
+    ```sh
+    cd crates/deltalake
+    cargo run --example basic_operations --features="datafusion"
+    ```
 
-These issues are planned eventually, but need investigation or to be unblocked by work currently in the roadmap.
+## Run the docs locally
+*This serves your local contents of docs via a web browser, handy for checking what they look like if you are making changes to docs or docstings*
 
-* Polars read support: make it possible to read a Delta Lake into a Polars DataFrame
-* Polars write support: make it possible to write a Polars DataFrame to a Delta Lake
-* Support operations that require rewriting data files (these are blocked on #851):
-    * Delete transactions via Rust: Implement proper Delta delete row operations via the Rust interface.  Something like this:  deltaTable.delete("birthDate < '1955-01-01'")
-    * Delete transactions via Python: Python bindings for the Delta delete row operations
-    * Merge transactions via Rust: Full support for merge operations via Rust
-    * Merge transactions via Python: Python bindings for merge operations
-* Airbyte connector support to read/write Delta Table as a source using the Python binding CDK source and destination (Airbyte issue: 16322)
-* Blog post on how to use delta-rs Airbyte connector
-* Add Z-ORDER to the Rust bindings
-* (P2) Some sort of file caching layer (#769). It would be equivalent to the Databricks disk cache, but as an object store (if that is viable).. 
-* (P2) Substrait support (#830): Generate query plans for operations requiring current table data as substrait (https://substrait.io) plans to integrate with different query backends
+```sh
+(cd python; make develop)
+pip install -r docs/requirements.txt
+mkdocs serve
+```
+
+## To make a pull request (PR)
+Make sure all the following steps run/pass locally before submitting a PR
+
+```sh
+cargo fmt -- --check
+cd python
+make check-rust
+make check-python
+make develop
+make unit-test
+make build-docs
+```
+
+## Developing in VSCode
+
+*These are just some basic steps/components to get you started, there are many other very useful extensions for VSCode*
+
+- For a better Rust development experience, install [rust extention](https://marketplace.visualstudio.com/items?itemName=1YiB.rust-bundle)
+- For debugging Rust code, install [CodeLLDB](https://marketplace.visualstudio.com/items?itemName=vadimcn.vscode-lldb). The extension should even create Debug launch configurations for the project if you allow it, an easy way to get started. Just set a breakpoint and run the relevant configuration.
+- For debugging from Python into Rust, follow this procedure:
+1. Add this to `.vscode/launch.json`
+```json
+{
+            "type": "lldb",
+            "request": "attach",
+            "name": "LLDB Attach to Python'",
+            "program": "${command:python.interpreterPath}",
+            "pid": "${command:pickMyProcess}",
+            "args": [],
+            "stopOnEntry": false,
+            "environment": [],
+            "externalConsole": true,
+            "MIMode": "lldb",
+            "cwd": "${workspaceFolder}"
+        }
+```
+2. Add a `breakpoint()` statement somewhere in your Python code (main function or at any point in Python code you know will be executed when you run it)
+3. Add a breakpoint in Rust code in VSCode editor where you want to drop into the debugger
+4. Run the relevant Python code function in your terminal, execution should drop into the Python debugger showing `PDB` prompt
+5. Run the following in that promt to get the Python process ID: `import os; os.getpid()`
+6. Run the `LLDB Attach to Python` from the `Run and Debug` panel of VSCode. This will prompt you for a Process ID to attach to, enter the Python process ID obtained earlier (this will also be in the dropdown but that dropdown will have many process IDs)
+7. LLDB make take couple of seconds to attach to the process
+8. When the debugger is attached to the process (you will notice the debugger panels get filled with extra info), enter `c`+Enter in the `PDB` prompt in your terminal - the execution should continue until the breakpoint in Rust code is hit. From this point it's a standard debugging procecess.
+
+
