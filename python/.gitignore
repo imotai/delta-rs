@@ -7,6 +7,7 @@ __pycache__/
 # Unit test / coverage reports
 .coverage
 .pytest_cache/
+.benchmarks/
 
 # mypy
 .mypy_cache/
@@ -15,3 +16,9 @@ __pycache__/
 docs/build
 
 *.so
+
+# dat data
+dat-data
+
+wheels/
+uv.lock

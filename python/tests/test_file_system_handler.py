@@ -34,7 +34,7 @@ def test_file_info(file_systems, table_data):
     info = store.get_file_info(file_path)
     arrow_info = arrow_fs.get_file_info(file_path)
 
-    assert type(info) == type(arrow_info)
+    assert type(info) is type(arrow_info)
     assert info.path == arrow_info.path
     assert info.type == arrow_info.type
     assert info.size == arrow_info.size
@@ -97,6 +97,29 @@ def test_open_input_file(file_systems, table_data):
     assert file.read(10) == arrow_file.read(10)
     assert file.read1(10) == arrow_file.read1(10)
     assert file.read_at(10, 0) == arrow_file.read_at(10, 0)
+
+
+def test_open_input_file_with_size(tmp_path, table_data):
+    file_path = "table.parquet"
+    input_size = 12345  # incorrect file size for testing purposes
+
+    # test that injected file size gets stored correctly
+    store1 = DeltaStorageHandler(
+        str(tmp_path.absolute()), known_sizes={file_path: input_size}
+    )
+    wrapped_fs = fs.PyFileSystem(store1)
+    arrow_fs = fs.SubTreeFileSystem(str(tmp_path.absolute()), fs.LocalFileSystem())
+    pq.write_table(table_data, file_path, filesystem=arrow_fs)
+    file = wrapped_fs.open_input_file(file_path)
+    assert file.size() == input_size
+
+    # confirm that true size is different
+    store2 = DeltaStorageHandler(str(tmp_path.absolute()))
+    wrapped_fs = fs.PyFileSystem(store2)
+    arrow_fs = fs.SubTreeFileSystem(str(tmp_path.absolute()), fs.LocalFileSystem())
+    pq.write_table(table_data, file_path, filesystem=arrow_fs)
+    file = wrapped_fs.open_input_file(file_path)
+    assert file.size() != input_size
 
 
 def test_read_table(file_systems, table_data):
