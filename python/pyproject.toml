@@ -1,32 +1,28 @@
 [build-system]
-requires = ["maturin>=0.14,<0.15"]
+requires = ["maturin>=1,<2"]
 build-backend = "maturin"
 
 [project]
 name = "deltalake"
 description = "Native Delta Lake Python binding based on delta-rs with Pandas integration"
 readme = "README.md"
-license = {file = "LICENSE.txt"}
-requires-python = ">=3.7"
+license = { file = "licenses/deltalake_license.txt" }
+requires-python = ">=3.9"
 keywords = ["deltalake", "delta", "datalake", "pandas", "arrow"]
 classifiers = [
-    "Development Status :: 3 - Alpha",
     "License :: OSI Approved :: Apache Software License",
-    "Programming Language :: Python :: 3 :: Only"
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
 ]
-dependencies = [
-    "pyarrow>=7",
-    'typing-extensions;python_version<"3.8"',
-]
+dependencies = ["pyarrow>=16,<19"]
+dynamic = ["version"]
 
 [project.optional-dependencies]
-pandas = [
-    "pandas"
-]
+pandas = ["pandas"]
 devel = [
-    "mypy",
-    "black",
-    "isort",
+    "azure-storage-blob==12.20.0",
     "packaging>=20",
     "pytest",
     "pytest-mock",
@@ -34,16 +30,28 @@ devel = [
     "pytest-timeout",
     "sphinx<=4.5",
     "sphinx-rtd-theme",
-    "toml"
+    "toml",
+    "wheel",
+    "pip>=24.0",
+    "pytest-benchmark",
+    # keep ruff and mypy versions in sync with .github/workflows/python_build.yml
+    "mypy==1.10.1",
+    "ruff==0.5.2",
 ]
+polars = ["polars==1.17.1"]
+lakefs = ["lakefs==0.8.0"]
 pyspark = [
     "pyspark",
-    "delta-spark"
+    "delta-spark",
+    "numpy==1.26.4", # pyspark is not compatible with latest numpy
 ]
 
 [project.urls]
-documentation = "https://delta-io.github.io/delta-rs/python/"
-repository = "https://github.com/delta-io/delta-rs"
+documentation = "https://delta-io.github.io/delta-rs/"
+repository = "https://github.com/delta-io/delta-rs/tree/main/python/"
+
+[tool.maturin]
+module-name = "deltalake._internal"
 
 [tool.mypy]
 files = "deltalake/*.py"
@@ -63,23 +71,37 @@ warn_return_any = false
 implicit_reexport = true
 strict_equality = true
 
-[tool.isort]
-profile = "black"
-src_paths = ["deltalake", "tests"]
+[tool.ruff.lint]
+select = [
+    # pycodestyle error
+    "E",
+    # pyflakes
+    "F",
+    # isort
+    "I",
+    # ruff-specific rules
+    "RUF",
+]
+ignore = ["E501"]
 
-[tool.black]
-include = '\.pyi?$'
-exclude = "venv"
+[tool.ruff.lint.isort]
+known-first-party = ["deltalake"]
 
 [tool.pytest.ini_options]
-addopts = "--cov=deltalake -v -m 'not integration'"
-testpaths = [
-    "tests",
-]
+addopts = "-v -m 'not integration and not benchmark'"
+testpaths = ["tests", "deltalake"]
 markers = [
     "integration: marks tests as integration tests (deselect with '-m \"not integration\"')",
     "s3: marks tests as integration tests with S3 (deselect with '-m \"not s3\"')",
     "azure: marks tests as integration tests with Azure Blob Store",
     "pandas: marks tests that require pandas",
+    "polars: marks tests that require polars",
+    "lakefs: marks tests that require lakefs",
+    "unitycatalog_databricks: marks tests that require unitycatalog_databricks",
+    "unitycatalog_oss: marks tests that require unitycatalog_oss",
     "pyspark: marks tests that require pyspark",
 ]
+
+[tool.coverage.run]
+branch = true
+source = ["deltalake"]

@@ -1,3 +1,4 @@
+use chrono::Duration;
 use clap::{App, AppSettings, Arg};
 
 #[tokio::main(flavor = "current_thread")]
@@ -6,7 +7,7 @@ async fn main() -> anyhow::Result<()> {
 
     let matches = App::new("Delta table inspector")
         .version(env!("CARGO_PKG_VERSION"))
-        .about("Utility to help inspect Delta talebs")
+        .about("Utility to help inspect Delta tables")
         .setting(AppSettings::SubcommandRequiredElseHelp)
         .subcommand(
             App::new("info")
@@ -17,7 +18,7 @@ async fn main() -> anyhow::Result<()> {
         .subcommand(
             App::new("files")
                 .setting(AppSettings::ArgRequiredElseHelp)
-                .about("output list of files for a given version, defalt to latest")
+                .about("output list of files for a given version, default to latest")
                 .args(&[
                     Arg::new("uri").help("Table URI").required(true),
                     Arg::new("full_uri")
@@ -66,33 +67,34 @@ async fn main() -> anyhow::Result<()> {
             };
 
             if files_matches.is_present("full_uri") {
-                table.get_file_uris().for_each(|f| println!("{}", f));
+                table.get_file_uris()?.for_each(|f| println!("{f}"));
             } else {
-                table.get_files_iter().for_each(|f| println!("{}", f));
+                table.get_files_iter()?.for_each(|f| println!("{f}"));
             };
         }
         Some(("info", info_matches)) => {
             let table_uri = info_matches.value_of("uri").unwrap();
             let table = deltalake::open_table(table_uri).await?;
-            println!("{}", table);
+            println!("{table}");
         }
         Some(("vacuum", vacuum_matches)) => {
             let dry_run = !vacuum_matches.is_present("no_dry_run");
             let table_uri = vacuum_matches.value_of("uri").unwrap();
             let table = deltalake::open_table(table_uri).await?;
-            let files = table
-                .vacuum(
-                    vacuum_matches.value_of("retention_hours").map(|s| {
-                        s.parse::<u64>()
-                            .expect("retention hour should be an unsigned integer")
-                    }),
-                    dry_run,
-                )
+            let retention = vacuum_matches
+                .value_of("retention_hours")
+                .map(|s| s.parse::<i64>().unwrap())
+                .unwrap();
+            let (_table, metrics) = deltalake::operations::DeltaOps(table)
+                .vacuum()
+                .with_retention_period(Duration::hours(retention))
+                .with_dry_run(dry_run)
                 .await?;
+
             if dry_run {
-                println!("Files to deleted: {:#?}", files);
+                println!("Files to deleted: {metrics:#?}");
             } else {
-                println!("Files deleted: {:#?}", files);
+                println!("Files deleted: {metrics:#?}");
             }
         }
         _ => unreachable!(),
