@@ -148,7 +148,7 @@ impl AtomicRenameState {
 
 #[inline]
 fn source_key_from_wid(wid: WriterId) -> String {
-    format!("writer_{}", wid)
+    format!("writer_{wid}")
 }
 
 impl AtomicRenameSys {
@@ -221,7 +221,7 @@ impl Model for AtomicRenameSys {
                 WriterState::RepairRenameReturned => {
                     match writer.rename_err {
                         Some(RenameErr::AlreadyExists) => {
-                            // already reapired by other writer
+                            // already repaired by other writer
                             // TODO: still need to perform the delete cleanup?
                             actions.push(Action::UpdateLockData(wid));
                         }
@@ -456,7 +456,7 @@ impl Model for AtomicRenameSys {
                 if state.blob_store_deleted(src) {
                     let mut writer = &mut state.writer_ctx[wid];
                     // source object cleaned by up another worker's repair, it's not a real
-                    // conflict, save to assume the rename was successfull
+                    // conflict, save to assume the rename was successful
                     writer.state = WriterState::Shutdown;
                 } else {
                     let mut writer = &mut state.writer_ctx[wid];
@@ -507,7 +507,7 @@ impl Model for AtomicRenameSys {
         Self::State: std::fmt::Debug,
     {
         self.next_state(last_state, action).map(|next_state| {
-            let mut lines = vec![format!("{:#?}", next_state)];
+            let mut lines = vec![format!("{next_state:#?}")];
             lines.push(format!(
                 "expected_deletes: {:?}",
                 self.derive_expected_deletes()
@@ -519,16 +519,14 @@ impl Model for AtomicRenameSys {
 
             let writer_versions = next_state.writer_versions();
             lines.push(format!(
-                "writer_versions({}): {:?}",
+                "writer_versions({}): {writer_versions:?}",
                 writer_versions.len(),
-                writer_versions,
             ));
 
             let blob_store_obj_keys = next_state.blob_store_obj_keys();
             lines.push(format!(
-                "blob_store_obj_keys({}): {:?}",
+                "blob_store_obj_keys({}): {blob_store_obj_keys:?}",
                 blob_store_obj_keys.len(),
-                blob_store_obj_keys,
             ));
 
             lines.join("\n")
@@ -594,7 +592,7 @@ impl Model for AtomicRenameSys {
                     && writer_versions.len() >= sys.writer_cnt
                     // all versions have been written into blobl store
                     && blob_store_obj_keys.is_superset(&writer_versions)
-                    && blob_store_obj_values == writer_versions.into_iter().map(|s| format!("writer_{}", s)).collect()
+                    && blob_store_obj_values == writer_versions.into_iter().map(|s| format!("writer_{s}")).collect()
             }),
             Property::<Self>::sometimes("lock expires", |_, state| {
                 state
